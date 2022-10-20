@@ -24,11 +24,6 @@ parameters:
   generate: expression
   name: GITHUB_WEBHOOK_SECRET
   required: true
-- description: A secret string used to configure the Generic webhook.
-  from: '[a-zA-Z0-9]{40}'
-  generate: expression
-  name: GENERIC_WEBHOOK_SECRET
-  required: true
 objects:
 - apiVersion: image.openshift.io/v1
   kind: ImageStream
