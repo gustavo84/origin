@@ -2,34 +2,6 @@ apiVersion: template.openshift.io/v1
 kind: Template
 metadata:
   name: maven-pipeline
-parameters:
-- name: APP_NAME
-  description: The name assigned to all of the application objects defined in this template.
-  displayName: Application Name
-  required: true
-  value: openshift-jee-sample
-- name: GIT_SOURCE_URL
-  description: The source URL for the application
-  displayName: Source URL
-  required: true
-  value: https://github.com/openshift/openshift-jee-sample.git
-- name: GIT_SOURCE_REF
-  description: The source Ref for the application
-  displayName: Source Ref
-  required: true
-  value: master
-- description: Github trigger secret.  A difficult to guess string encoded as part of the webhook URL.  Not encrypted.
-  displayName: GitHub Webhook Secret
-  from: '[a-zA-Z0-9]{40}'
-  generate: expression
-  name: GITHUB_WEBHOOK_SECRET
-  required: true
-- description: A secret string used to configure the Generic webhook.
-  displayName: Generic Webhook Secret
-  from: '[a-zA-Z0-9]{40}'
-  generate: expression
-  name: GENERIC_WEBHOOK_SECRET
-  required: true
 objects:
 - apiVersion: image.openshift.io/v1
   kind: ImageStream
@@ -282,3 +254,31 @@ objects:
     port:
       targetPort: 8080-tcp
     wildcardPolicy: None
+parameters:
+- name: APP_NAME
+  description: The name assigned to all of the application objects defined in this template.
+  displayName: Application Name
+  required: true
+  value: openshift-jee-sample
+- name: GIT_SOURCE_URL
+  description: The source URL for the application
+  displayName: Source URL
+  required: true
+  value: https://github.com/openshift/openshift-jee-sample.git
+- name: GIT_SOURCE_REF
+  description: The source Ref for the application
+  displayName: Source Ref
+  required: true
+  value: master
+- description: Github trigger secret.  A difficult to guess string encoded as part of the webhook URL.  Not encrypted.
+  displayName: GitHub Webhook Secret
+  from: '[a-zA-Z0-9]{40}'
+  generate: expression
+  name: GITHUB_WEBHOOK_SECRET
+  required: true
+- description: A secret string used to configure the Generic webhook.
+  displayName: Generic Webhook Secret
+  from: '[a-zA-Z0-9]{40}'
+  generate: expression
+  name: GENERIC_WEBHOOK_SECRET
+  required: true
