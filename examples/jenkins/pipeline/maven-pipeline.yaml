@@ -1,110 +1,60 @@
 apiVersion: template.openshift.io/v1
 kind: Template
+labels:
+  template: application-template-sample-pipeline
+message: |-
+  A Jenkins server must be instantiated in this project to manage
+  the Pipeline BuildConfig created by this template.  You will be able to log in to
+  it using your OpenShift user credentials.
 metadata:
-  name: maven-pipeline
+  annotations:
+    openshift.io/display-name: Pipeline Build Example
+    description: |-
+      This example showcases the new Jenkins Pipeline integration in OpenShift,
+      which performs continuous integration and deployment right on the platform.
+      The template contains a Jenkinsfile - a definition of a multi-stage CI/CD process - that
+      leverages the underlying OpenShift platform for dynamic and scalable
+      builds. OpenShift integrates the status of your pipeline builds into the web
+      console allowing you to see your entire application lifecycle in a single view.
+    iconClass: icon-jenkins
+    tags: instant-app,jenkins
+  name: jenkins-pipeline-example
 objects:
-- apiVersion: image.openshift.io/v1
-  kind: ImageStream
-  metadata:
-    labels:
-      app: ${APP_NAME}
-    name: ${APP_NAME}
-  spec: {}
-  status:
-    dockerImageRepository: ""
-- apiVersion: image.openshift.io/fv1
-  kind: ImageStream
-  metadata:
-    name: wildfly
-  spec:
-    tags:
-    - annotations:
-        supports: wildfly:10.1,jee,java
-        tags: builder,wildfly,java
-        version: "10.1"
-      from:
-        kind: DockerImage
-        name: openshift/wildfly-101-centos7:latest
-      name: "10.1"
-    - annotations:
-        supports: jee,java
-        tags: builder,wildfly,java
-      from:
-        kind: ImageStreamTag
-        name: "10.1"
-      name: latest
 - apiVersion: build.openshift.io/v1
   kind: BuildConfig
   metadata:
     annotations:
       pipeline.alpha.openshift.io/uses: '[{"name": "${NAME}", "namespace": "", "kind": "DeploymentConfig"}]'
-    creationTimestamp: null
     labels:
-      name: ${APP_NAME}
-    name: ${APP_NAME}
+      name: sample-pipeline
+    name: sample-pipeline
   spec:
     strategy:
       jenkinsPipelineStrategy:
         jenkinsfile: |-
           try {
              timeout(time: 20, unit: 'MINUTES') {
-                def appName="${APP_NAME}"
-                def project=""
-                node {
-                  stage("Initialize") {
-                    project = env.PROJECT_NAME
-                  }
-                }
-                node("maven") {
-                  stage("Checkout") {
-                    git url: "${GIT_SOURCE_URL}", branch: "${GIT_SOURCE_REF}"
-                  }
-                  stage("Build WAR") {
-                    sh "mvn clean package -Popenshift"
-                    stash name:"war", includes:"target/ROOT.war"
-                  }
-                }
-                node {
-                  stage("Build Image") {
-                    unstash name:"war"
-                    def status = sh(returnStdout: true, script: "oc start-build ${appName}-docker --from-file=target/ROOT.war -n ${project}")
-                    def result = status.split("\n").find{ it.matches("^build.*started") }
-                    if(!result) {
-                      echo "ERROR: No started build found for ${appName}"
-                      currentBuild.result = 'FAILURE'
-                      return
+                node('nodejs') {
+                    stage('build') {
+                      openshift.withCluster() {
+                         openshift.withProject() {
+                            def bld = openshift.startBuild('${NAME}')
+                            bld.untilEach {
+                              return it.object().status.phase == "Running"
+                            }
+                            bld.logs('-f')
+                         }
+                      }
                     }
-                    // result can be:
-                    // - build "build-name" started
-                    // - build build.build.openshift.io/build-name started
-                    // - build "build.build.openshift.io/build-name" started
-                    // Goal is to isolate "build-name"
-                    def startedBuild = result.replaceAll("build [^0-9a-zA-Z]*", "").replaceAll("[^0-9a-zA-Z]* started", "").replaceFirst("^.*/", "")
-                    echo "Build ${startedBuild} has started. Now watching it ..."
-                    timeout(time: 20, unit: 'MINUTES') {
+                    stage('deploy') {
                       openshift.withCluster() {
                         openshift.withProject() {
-                          def build = openshift.selector('builds', "${startedBuild}")
-                          build.untilEach {
-                            def object = it.object()
-                            if(object.status.phase == "Failed") {
-                              error("Build ${startedBuild} failed")
-                            }
-                            return object.status.phase == "Complete"
-                          }
+                          def dc = openshift.selector('dc', '${NAME}')
+                          dc.rollout().latest()
                         }
                       }
                     }
                   }
-                  stage("Deploy") {
-                    openshift.withCluster() {
-                      openshift.withProject() {
-                        def dc = openshift.selector('dc', "${appName}")
-                        dc.rollout().status()
-                      }
-                    }
-                  }
-                }
              }
           } catch (err) {
              echo "in catch block"
@@ -115,170 +65,315 @@ objects:
       type: JenkinsPipeline
     triggers:
     - github:
-        secret: "${GITHUB_WEBHOOK_SECRET}"
+        secret: secret101
       type: GitHub
     - generic:
-        secret: "${GENERIC_WEBHOOK_SECRET}"
+        secret: secret101
       type: Generic
-- apiVersion: build.openshift.io/v1
-  kind: BuildConfig
+- apiVersion: v1
+  kind: Secret
   metadata:
-    labels:
-      app: ${APP_NAME}-docker
-    name: ${APP_NAME}-docker
-  spec:
-    output:
-      to:
-        kind: ImageStreamTag
-        name: ${APP_NAME}:latest
-    postCommit: {}
-    resources: {}
-    runPolicy: Serial
-    source:
-      dockerfile: |-
-        FROM wildfly
-        COPY ROOT.war /wildfly/standalone/deployments/ROOT.war
-        CMD $STI_SCRIPTS_PATH/run
-      binary:
-        asFile: ROOT.war
-      type: Docker
-    strategy:
-      dockerStrategy:
-        from:
-          kind: ImageStreamTag
-          name: wildfly:latest
-      type: Docker
-    triggers: []
-- apiVersion: apps.openshift.io/v1
-  kind: DeploymentConfig
-  metadata:
-    labels:
-      app: ${APP_NAME}
-    name: ${APP_NAME}
-  spec:
-    replicas: 1
-    selector:
-      app: ${APP_NAME}
-      deploymentconfig: ${APP_NAME}
-    strategy:
-      rollingParams:
-        intervalSeconds: 1
-        maxSurge: 25%
-        maxUnavailable: 25%
-        timeoutSeconds: 600
-        updatePeriodSeconds: 1
-      type: Rolling
-    template:
-      metadata:
-        labels:
-          app: ${APP_NAME}
-          deploymentconfig: ${APP_NAME}
-      spec:
-        containers:
-        - image: ${APP_NAME}:latest
-          imagePullPolicy: Always
-          name: ${APP_NAME}
-          ports:
-          - containerPort: 8080
-            protocol: TCP
-          resources: {}
-          terminationMessagePath: /dev/termination-log
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 8080
-              scheme: HTTP
-            initialDelaySeconds: 10
-            timeoutSeconds: 2
-            periodSeconds: 10
-            successThreshold: 1
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 8080
-              scheme: HTTP
-            initialDelaySeconds: 30
-            timeoutSeconds: 2
-            periodSeconds: 10
-            successThreshold: 1
-            failureThreshold: 3
-        dnsPolicy: ClusterFirst
-        restartPolicy: Always
-        securityContext: {}
-        terminationGracePeriodSeconds: 30
-    test: false
-    triggers:
-    - type: ConfigChange
-    - imageChangeParams:
-        automatic: true
-        containerNames:
-        - ${APP_NAME}
-        from:
-          kind: ImageStreamTag
-          name: ${APP_NAME}:latest
-      type: ImageChange
-  status: {}
+    name: ${NAME}
+  stringData:
+    database-admin-password: ${DATABASE_ADMIN_PASSWORD}
+    database-password: ${DATABASE_PASSWORD}
+    database-user: ${DATABASE_USER}
 - apiVersion: v1
   kind: Service
   metadata:
     annotations:
-      openshift.io/generated-by: OpenShiftNewApp
-    labels:
-      app: ${APP_NAME}
-    name: ${APP_NAME}
+      description: Exposes and load balances the application pods
+      service.alpha.openshift.io/dependencies: '[{"name": "${DATABASE_SERVICE_NAME}", "kind": "Service"}]'
+    name: ${NAME}
   spec:
     ports:
-    - name: 8080-tcp
-      port: 8080
-      protocol: TCP
-      targetPort: 8080
+      - name: web
+        port: 8080
+        targetPort: 8080
     selector:
-      app: ${APP_NAME}
-      deploymentconfig: ${APP_NAME}
-    sessionAffinity: None
-    type: ClusterIP
-  status:
-    loadBalancer: {}
+      name: ${NAME}
 - apiVersion: route.openshift.io/v1
   kind: Route
   metadata:
-    name: ${APP_NAME}
-    labels:
-      app: ${APP_NAME}
+    name: ${NAME}
   spec:
+    host: ${APPLICATION_DOMAIN}
     to:
       kind: Service
-      name: ${APP_NAME}
-      weight: 100
-    port:
-      targetPort: 8080-tcp
-    wildcardPolicy: None
+      name: ${NAME}
+- apiVersion: image.openshift.io/v1
+  kind: ImageStream
+  metadata:
+    annotations:
+      description: Keeps track of changes in the application image
+    name: ${NAME}
+- apiVersion: build.openshift.io/v1
+  kind: BuildConfig
+  metadata:
+    annotations:
+      description: Defines how to build the application
+      template.alpha.openshift.io/wait-for-ready: "true"
+    name: ${NAME}
+  spec:
+    output:
+      to:
+        kind: ImageStreamTag
+        name: ${NAME}:latest
+    postCommit: {}
+    source:
+      contextDir: ${CONTEXT_DIR}
+      git:
+        ref: ${SOURCE_REPOSITORY_REF}
+        uri: ${SOURCE_REPOSITORY_URL}
+      type: Git
+    strategy:
+      sourceStrategy:
+        env:
+          - name: NPM_MIRROR
+            value: ${NPM_MIRROR}
+        from:
+          kind: ImageStreamTag
+          name: nodejs:${NODEJS_VERSION}
+          namespace: ${NAMESPACE}
+      type: Source
+    triggers:
+      - github:
+          secret: ${GITHUB_WEBHOOK_SECRET}
+        type: GitHub
+      - generic:
+          secret: ${GENERIC_WEBHOOK_SECRET}
+        type: Generic
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    annotations:
+      description: Defines how to deploy the application server
+      template.alpha.openshift.io/wait-for-ready: "true"
+    labels:
+      app.openshift.io/runtime: nodejs
+    name: ${NAME}
+  spec:
+    replicas: 1
+    selector:
+      name: ${NAME}
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          app.openshift.io/runtime: nodejs
+          name: ${NAME}
+        name: ${NAME}
+      spec:
+        containers:
+          - env:
+              - name: DATABASE_SERVICE_NAME
+                value: ${DATABASE_SERVICE_NAME}
+              - name: POSTGRESQL_USER
+                valueFrom:
+                  secretKeyRef:
+                    key: database-user
+                    name: ${NAME}
+              - name: POSTGRESQL_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: database-password
+                    name: ${NAME}
+              - name: POSTGRESQL_DATABASE
+                value: ${DATABASE_NAME}
+              - name: POSTGRESQL_ADMIN_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: database-admin-password
+                    name: ${NAME}
+            image: ' '
+            livenessProbe:
+              httpGet:
+                path: /
+                port: 8080
+              initialDelaySeconds: 30
+              timeoutSeconds: 3
+            name: nodejs-postgresql-example
+            ports:
+              - containerPort: 8080
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 8080
+              initialDelaySeconds: 3
+              timeoutSeconds: 3
+            resources:
+              limits:
+                memory: ${MEMORY_LIMIT}
+    triggers:
+      - imageChangeParams:
+          automatic: false
+          containerNames:
+            - nodejs-postgresql-example
+          from:
+            kind: ImageStreamTag
+            name: ${NAME}:latest
+        type: ImageChange
+      - type: ConfigChange
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      description: Exposes the database server
+    name: ${DATABASE_SERVICE_NAME}
+  spec:
+    ports:
+      - name: postgresql
+        port: 5432
+        targetPort: 5432
+    selector:
+      name: ${DATABASE_SERVICE_NAME}
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    annotations:
+      description: Defines how to deploy the database
+      template.alpha.openshift.io/wait-for-ready: "true"
+    name: ${DATABASE_SERVICE_NAME}
+  spec:
+    replicas: 1
+    selector:
+      name: ${DATABASE_SERVICE_NAME}
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          name: ${DATABASE_SERVICE_NAME}
+        name: ${DATABASE_SERVICE_NAME}
+      spec:
+        containers:
+          - env:
+              - name: POSTGRESQL_USER
+                valueFrom:
+                  secretKeyRef:
+                    key: database-user
+                    name: ${NAME}
+              - name: POSTGRESQL_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: database-password
+                    name: ${NAME}
+              - name: POSTGRESQL_DATABASE
+                value: ${DATABASE_NAME}
+              - name: POSTGRESQL_ADMIN_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: database-admin-password
+                    name: ${NAME}
+            image: ' '
+            livenessProbe:
+              initialDelaySeconds: 30
+              tcpSocket:
+                port: 5432
+              timeoutSeconds: 1
+            name: postgresql
+            ports:
+              - containerPort: 5432
+            resources:
+              limits:
+                memory: ${MEMORY_POSTGRESQL_LIMIT}
+            volumeMounts:
+              - mountPath: /var/lib/postgresql/data
+                name: ${DATABASE_SERVICE_NAME}-data
+        volumes:
+          - emptyDir:
+              medium: ""
+            name: ${DATABASE_SERVICE_NAME}-data
+    triggers:
+      - imageChangeParams:
+          automatic: true
+          containerNames:
+            - postgresql
+          from:
+            kind: ImageStreamTag
+            name: postgresql:${POSTGRESQL_VERSION}
+            namespace: ${NAMESPACE}
+        type: ImageChange
+      - type: ConfigChange
 parameters:
-- name: APP_NAME
-  description: The name assigned to all of the application objects defined in this template.
-  displayName: Application Name
-  required: true
-  value: openshift-jee-sample
-- name: GIT_SOURCE_URL
-  description: The source URL for the application
-  displayName: Source URL
-  required: true
-  value: https://github.com/openshift/openshift-jee-sample.git
-- name: GIT_SOURCE_REF
-  description: The source Ref for the application
-  displayName: Source Ref
-  required: true
-  value: master
-- description: Github trigger secret.  A difficult to guess string encoded as part of the webhook URL.  Not encrypted.
-  displayName: GitHub Webhook Secret
-  from: '[a-zA-Z0-9]{40}'
-  generate: expression
-  name: GITHUB_WEBHOOK_SECRET
-  required: true
-- description: A secret string used to configure the Generic webhook.
-  displayName: Generic Webhook Secret
-  from: '[a-zA-Z0-9]{40}'
-  generate: expression
-  name: GENERIC_WEBHOOK_SECRET
-  required: true
+  - description: The name assigned to all of the frontend objects defined in this template.
+    displayName: Name
+    name: NAME
+    required: true
+    value: nodejs-postgresql-example
+  - description: The OpenShift Namespace where the ImageStream resides.
+    displayName: Namespace
+    name: NAMESPACE
+    required: true
+    value: openshift
+  - description: Version of NodeJS image to be used (14-ubi8, or latest).
+    displayName: Version of NodeJS Image
+    name: NODEJS_VERSION
+    required: true
+    value: 14-ubi8
+  - description: Version of PostgreSQL image to be used (12-el8, or latest).
+    displayName: Version of PostgreSQL Image
+    name: POSTGRESQL_VERSION
+    required: true
+    value: 12-el8
+  - description: Maximum amount of memory the Node.js container can use.
+    displayName: Memory Limit
+    name: MEMORY_LIMIT
+    required: true
+    value: 256Mi
+  - description: Maximum amount of memory the PostgreSQL container can use.
+    displayName: Memory Limit (PostgreSQL)
+    name: MEMORY_POSTGRESQL_LIMIT
+    required: true
+    value: 256Mi
+  - description: The URL of the repository with your application source code.
+    displayName: Git Repository URL
+    name: SOURCE_REPOSITORY_URL
+    required: true
+    value: https://github.com/nodeshift-starters/nodejs-rest-http-crud.git
+  - description: Set this to a branch name, tag or other ref of your repository if you are not using the default branch.
+    displayName: Git Reference
+    name: SOURCE_REPOSITORY_REF
+  - description: Set this to the relative path to your project if it is not in the root of your repository.
+    displayName: Context Directory
+    name: CONTEXT_DIR
+  - description: The exposed hostname that will route to the Node.js service, if left blank a value will be defaulted.
+    displayName: Application Hostname
+    name: APPLICATION_DOMAIN
+  - description: Github trigger secret.  A difficult to guess string encoded as part of the webhook URL.  Not encrypted.
+    displayName: GitHub Webhook Secret
+    from: '[a-zA-Z0-9]{40}'
+    generate: expression
+    name: GITHUB_WEBHOOK_SECRET
+  - description: A secret string used to configure the Generic webhook.
+    displayName: Generic Webhook Secret
+    from: '[a-zA-Z0-9]{40}'
+    generate: expression
+    name: GENERIC_WEBHOOK_SECRET
+  - displayName: Database Service Name
+    name: DATABASE_SERVICE_NAME
+    required: true
+    value: postgresql
+  - description: Username for PostgreSQL user that will be used for accessing the database.
+    displayName: PostgreSQL Username
+    from: user[A-Z0-9]{3}
+    generate: expression
+    name: DATABASE_USER
+  - description: Password for the PostgreSQL user.
+    displayName: PostgreSQL Password
+    from: '[a-zA-Z0-9]{16}'
+    generate: expression
+    name: DATABASE_PASSWORD
+  - displayName: Database Name
+    name: DATABASE_NAME
+    required: true
+    value: my_data
+  - description: Password for the database admin user.
+    displayName: Database Administrator Password
+    from: '[a-zA-Z0-9]{16}'
+    generate: expression
+    name: DATABASE_ADMIN_PASSWORD
+  - description: The custom NPM mirror URL
+    displayName: Custom NPM Mirror URL
+    name: NPM_MIRROR
